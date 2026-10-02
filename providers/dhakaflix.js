@@ -1,82 +1,71 @@
 // ─── DhakaFlix Nuvio Scraper Plugin ──────────────────────────────────────────
-// Scrapes the DhakaFlix local FTP server (h5ai) for movies, TV series, and anime.
-// Returns direct .mkv HTTP stream URLs.
+// Scrapes DhakaFlix FTP servers using native h5ai search API for ultra-fast,
+// recursive file lookup across movies, TV series, and anime.
+// Returns direct HTTP stream URLs with accurate file sizes and qualities.
 // Promise-only (no async/await) for React Native sandbox compatibility.
 // ─────────────────────────────────────────────────────────────────────────────
 
 var cheerio = require('cheerio-without-node-native');
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Configuration ───────────────────────────────────────────────────────────
 var PROVIDER  = 'dhakaflix';
 var TMDB_KEY  = '439c478a771f35c05022f9feabcca01c';
 var TMDB_BASE = 'https://api.themoviedb.org/3';
 
-// Movie category directories — all searched in parallel
-var MOVIE_CATS = [
-  'http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/',
-  'http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/South%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/',
-  'http://172.16.50.7/DHAKA-FLIX-7/Kolkata%20Bangla%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies%20%281080p%29/',
-  'http://172.16.50.7/DHAKA-FLIX-7/Foreign%20Language%20Movies/',
-  'http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/',
-  'http://172.16.50.7/DHAKA-FLIX-7/3D%20Movies/',
-];
-
-// English/International TV — 4 alphabetical sub-sections
-var TV_BASE = 'http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/';
-var TV_SECTIONS = [
-  TV_BASE + 'TV%20Series%20%E2%98%85%20%200%20%20%E2%80%94%20%209/',
-  TV_BASE + 'TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/',
-  TV_BASE + 'TV%20Series%20%E2%99%A6%20%20M%20%20%E2%80%94%20%20R/',
-  TV_BASE + 'TV%20Series%20%E2%99%A6%20%20S%20%20%E2%80%94%20%20Z/',
-];
-
-// Korean TV — flat listing (all titles directly in root)
-var KOREAN_TV_BASE = 'http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/';
-
-// Anime — 5 alphabetical sub-sections
-var ANIME_BASE = 'http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/';
-var ANIME_SECTIONS = [
-  ANIME_BASE + 'Anime-TV%20Series%20%E2%98%85%20%200%20%20%E2%80%94%20%209/',
-  ANIME_BASE + 'Anime-TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20F/',
-  ANIME_BASE + 'Anime-TV%20Series%20%E2%99%A5%20%20G%20%20%E2%80%94%20%20M/',
-  ANIME_BASE + 'Anime-TV%20Series%20%E2%99%A6%20%20N%20%20%E2%80%94%20%20S/',
-  ANIME_BASE + 'Anime-TV%20Series%20%E2%99%A6%20%20T%20%20%E2%80%94%20%20Z/',
-];
+var SERVERS = {
+  movie: [
+    { base: 'http://172.16.50.14', root: '/DHAKA-FLIX-14/' },
+    { base: 'http://172.16.50.7',  root: '/DHAKA-FLIX-7/' }
+  ],
+  tv: [
+    { base: 'http://172.16.50.12', root: '/DHAKA-FLIX-12/' },
+    { base: 'http://172.16.50.14', root: '/DHAKA-FLIX-14/' }
+  ],
+  anime: [
+    { base: 'http://172.16.50.10', root: '/DHAKA-FLIX-10/' },
+    { base: 'http://172.16.50.14', root: '/DHAKA-FLIX-14/' }
+  ]
+};
 
 var REQ_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
-// ─── Utilities ───────────────────────────────────────────────────────────────
+// ─── Helper Functions ────────────────────────────────────────────────────────
 
-// Parse quality string from filename: "1080p", "720p", "480p", etc.
 function parseQuality(name) {
   var m = (name || '').match(/(\d{3,4})[pP]/);
   return m ? m[1] + 'p' : 'Unknown';
 }
 
-// Zero-pad a number: 1 → "01", 10 → "10"
 function pad(n) {
   return n < 10 ? '0' + n : '' + n;
 }
 
-// Normalize a title for fuzzy comparison: lowercase, strip punctuation, collapse spaces
+function formatSize(bytes) {
+  if (!bytes || typeof bytes !== 'number' || bytes <= 0) return 'Unknown';
+  var gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return gb.toFixed(2) + ' GB';
+  var mb = bytes / (1024 * 1024);
+  return mb.toFixed(1) + ' MB';
+}
+
 function norm(str) {
   return (str || '').toLowerCase()
-    .replace(/['']/g, '')       // smart quotes → nothing
-    .replace(/[:\-–—]/g, ' ')   // colons & dashes → space
-    .replace(/[^a-z0-9 ]/g, ' ') // everything else → space
+    .replace(/['']/g, '')
+    .replace(/[:\-–—]/g, ' ')
+    .replace(/[^a-z0-9 ]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-// Word-overlap similarity score between two strings (0..1)
-// Uses Sørensen–Dice-like formula on word sets
+function cleanForCompare(str) {
+  return norm(str)
+    .replace(/\b(1080p|720p|480p|2160p|4k|bluray|webrip|web|dl|dual|audio|multi|hindi|english|dubbed|esub|remastered)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function similarity(a, b) {
   var na = norm(a);
   var nb = norm(b);
@@ -91,268 +80,373 @@ function similarity(a, b) {
   return (2 * common) / (wa.length + wb.length);
 }
 
-// Parse h5ai directory listing HTML → [{text, href}]
-function parseLinks(html, baseUrl) {
-  var $ = cheerio.load(html);
-  var links = [];
-  $('a[href]').each(function(i, el) {
-    var href = $(el).attr('href') || '';
-    var text = $(el).text().trim();
-    // Skip navigation, parent dir, query-string links
-    if (!text || !href || href.indexOf('?') !== -1) return;
-    if (text === 'Parent Directory') return;
-    if (text === 'modern browsers') return;
-    if (text.indexOf('powered by') === 0) return;
-    // Make absolute URL
-    if (href.indexOf('http') !== 0) {
-      // Resolve relative href against base
-      var base = baseUrl.replace(/\/[^\/]*$/, '/');
-      if (href.charAt(0) === '/') {
-        // Absolute path — extract origin
-        var origin = baseUrl.match(/^https?:\/\/[^\/]+/);
-        href = (origin ? origin[0] : '') + href;
-      } else {
-        href = base + href;
+function isVideoFile(href, size) {
+  var clean = href.split('?')[0].toLowerCase();
+  return (/\.(mkv|mp4|avi)$/i.test(clean)) && (size !== null && size > 0);
+}
+
+// ─── Native h5ai Search API ──────────────────────────────────────────────────
+
+function h5aiSearch(serverBase, href, pattern) {
+  var url = serverBase.replace(/\/$/, '') + '/' + href.replace(/^\//, '');
+  return fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json;charset=utf-8',
+      'User-Agent': REQ_HEADERS['User-Agent']
+    },
+    body: JSON.stringify({
+      action: 'get',
+      search: {
+        href: decodeURIComponent(href),
+        pattern: pattern,
+        ignorecase: true
       }
-    }
-    try {
-      text = decodeURIComponent(text);
-    } catch(e) {}
-    links.push({ text: text, href: href });
-  });
-  return links;
-}
-
-// Fetch a directory listing and parse its links
-function fetchDir(url) {
-  console.log('[DhakaFlix] Fetching dir:', url.substring(0, 80) + '...');
-  return fetch(url, { headers: REQ_HEADERS })
-    .then(function(r) { return r.text(); })
-    .then(function(html) { return parseLinks(html, url); })
-    .catch(function(err) {
-      console.log('[DhakaFlix] Failed to fetch dir:', err.message || err);
-      return [];
-    });
-}
-
-// Find the best-matching link by title similarity (threshold = 0.4)
-function bestMatch(links, title) {
-  var best = null;
-  var bestScore = 0.4;
-  for (var i = 0; i < links.length; i++) {
-    var link = links[i];
-    var score = similarity(link.text, title);
-    if (score > bestScore) {
-      bestScore = score;
-      best = link;
-    }
-  }
-  if (best) {
-    console.log('[DhakaFlix] Best match for "' + title + '": "' + best.text + '" (score: ' + bestScore.toFixed(2) + ')');
-  }
-  return best;
-}
-
-// Pick correct English TV alpha section for a given title
-function tvSection(title) {
-  var c = norm(title).charAt(0);
-  if (/[0-9]/.test(c))       return TV_SECTIONS[0];
-  if (c >= 'a' && c <= 'l') return TV_SECTIONS[1];
-  if (c >= 'm' && c <= 'r') return TV_SECTIONS[2];
-  return TV_SECTIONS[3];
-}
-
-// Pick correct Anime alpha section for a given title
-function animeSection(title) {
-  var c = norm(title).charAt(0);
-  if (/[0-9]/.test(c))       return ANIME_SECTIONS[0];
-  if (c >= 'a' && c <= 'f') return ANIME_SECTIONS[1];
-  if (c >= 'g' && c <= 'm') return ANIME_SECTIONS[2];
-  if (c >= 'n' && c <= 's') return ANIME_SECTIONS[3];
-  return ANIME_SECTIONS[4];
-}
-
-// Get .mkv files from a folder
-function getMkvFiles(folderUrl) {
-  return fetchDir(folderUrl).then(function(links) {
-    return links.filter(function(l) {
-      return l.text.toLowerCase().endsWith('.mkv');
-    });
+    })
+  })
+  .then(function(r) {
+    if (!r.ok) return [];
+    return r.json();
+  })
+  .then(function(data) {
+    return (data && data.search) || [];
+  })
+  .catch(function(err) {
+    return [];
   });
 }
 
-// Build a stream object from a file link
-function makeStream(fileLink, titleStr) {
-  var fileName = fileLink.text;
-  var isDual   = /dual\s*audio/i.test(fileName);
-  var isMulti  = /multi\s*audio/i.test(fileName);
+function makeStream(serverBase, item, titleStr) {
+  var fileName = decodeURIComponent(item.href.split('/').pop());
+  var isDual   = /dual\s*audio/i.test(item.href);
+  var isMulti  = /multi\s*audio/i.test(item.href);
   var audioTag = isDual ? ' [Dual Audio]' : (isMulti ? ' [Multi Audio]' : '');
-  var quality  = parseQuality(fileName);
+  var quality  = parseQuality(fileName) || parseQuality(item.href);
+  var fullUrl  = serverBase.replace(/\/$/, '') + '/' + item.href.replace(/^\//, '');
+
   return {
     name:     'DhakaFlix - ' + quality,
     title:    titleStr + audioTag,
-    url:      fileLink.href,
+    url:      fullUrl,
     quality:  quality,
-    size:     'Unknown',
+    size:     formatSize(item.size),
     headers:  REQ_HEADERS,
     provider: PROVIDER
   };
 }
 
-// ─── Movie Search ────────────────────────────────────────────────────────────
-// For each movie category dir:
-//   1. Fetch the category root listing
-//   2. Try to find a year-based sub-folder (contains the year in link text)
-//   3. If year-folder found, list its contents; otherwise, try flat match
-//   4. Fuzzy-match the movie title folder
-//   5. List .mkv files inside the matched folder
+function getSearchQueries(title, origTitle) {
+  var queries = [];
+  function add(t) {
+    var s = (t || '').trim();
+    if (s && queries.indexOf(s) === -1) queries.push(s);
+  }
 
-function searchMovieCat(catUrl, title, year) {
-  return fetchDir(catUrl).then(function(links) {
-    // Try to find a year folder
-    var yearFolder = null;
-    for (var i = 0; i < links.length; i++) {
-      if (links[i].text.indexOf('(' + year + ')') !== -1) {
-        yearFolder = links[i];
-        break;
-      }
-    }
-    // If no year folder with parens, try plain year string
-    if (!yearFolder) {
-      for (var j = 0; j < links.length; j++) {
-        if (links[j].text.indexOf(year) !== -1) {
-          yearFolder = links[j];
-          break;
-        }
-      }
-    }
+  add(title);
+  if (origTitle && origTitle !== title) add(origTitle);
 
-    function findInLinks(subLinks) {
-      var best = bestMatch(subLinks, title);
-      if (!best) return Promise.resolve([]);
-      return getMkvFiles(best.href);
-    }
+  // Clean title without colons / dashes
+  var clean = (title || '').replace(/[:\-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+  add(clean);
 
-    if (yearFolder) {
-      console.log('[DhakaFlix] Found year folder:', yearFolder.text);
-      return fetchDir(yearFolder.href).then(findInLinks);
-    } else {
-      // No year folder — try flat match directly in root
-      return findInLinks(links);
-    }
-  }).catch(function(err) {
-    console.log('[DhakaFlix] Error searching category:', err.message || err);
-    return [];
-  });
+  // Short title before colon/dash
+  var shortTitle = (title || '').split(/[:\-–—]/)[0].trim();
+  if (shortTitle && shortTitle.length >= 3) add(shortTitle);
+
+  // Ampersand vs and
+  if (title && title.indexOf('&') !== -1) {
+    add(title.replace(/&/g, 'and').replace(/\s+/g, ' ').trim());
+  }
+
+  return queries;
 }
 
-function findMovieStreams(title, year, titleStr) {
-  var tasks = MOVIE_CATS.map(function(cat) {
-    return searchMovieCat(cat, title, year);
+// ─── Movie Search Logic ──────────────────────────────────────────────────────
+
+function searchMoviesOnServer(server, queries, title, year, titleStr) {
+  var serverBase = server.base;
+  var rootHref = server.root;
+  var targetClean = cleanForCompare(title);
+
+  var tasks = queries.map(function(q) {
+    return h5aiSearch(serverBase, rootHref, q);
   });
-  return Promise.all(tasks).then(function(results) {
-    // Flatten all results
-    var all = [];
-    results.forEach(function(r) { all = all.concat(r); });
-    // Deduplicate by URL
-    var seen = {};
-    var unique = all.filter(function(f) {
-      if (seen[f.href]) return false;
-      seen[f.href] = true;
-      return true;
-    });
-    return unique.map(function(f) { return makeStream(f, titleStr); });
-  });
-}
 
-// ─── TV / Anime Episode Search ───────────────────────────────────────────────
-// 1. Fetch the section listing
-// 2. Fuzzy-match the series folder
-// 3. Find "Season N" subfolder
-// 4. Find file containing "S0XE0Y" pattern
-
-function findEpisodeInSection(sectionUrl, title, seasonNum, episodeNum, titleStr) {
-  var seasonDir = 'Season ' + seasonNum;
-  var epCode    = 'S' + pad(seasonNum) + 'E' + pad(episodeNum);
-
-  return fetchDir(sectionUrl).then(function(links) {
-    var best = bestMatch(links, title);
-    if (!best) {
-      console.log('[DhakaFlix] No series match found in section');
-      return [];
-    }
-    console.log('[DhakaFlix] Matched series folder:', best.text);
-    return fetchDir(best.href).then(function(contents) {
-      // Find the Season subfolder
-      var seasonLink = null;
-      for (var i = 0; i < contents.length; i++) {
-        if (contents[i].text === seasonDir ||
-            contents[i].text.toLowerCase() === 'season ' + seasonNum) {
-          seasonLink = contents[i];
-          break;
+  return Promise.all(tasks).then(function(resultsList) {
+    var allItems = [];
+    var seenHref = {};
+    resultsList.forEach(function(list) {
+      list.forEach(function(item) {
+        if (!seenHref[item.href]) {
+          seenHref[item.href] = true;
+          allItems.push(item);
         }
-      }
-      // Looser match: text starts with "Season" and contains the number
-      if (!seasonLink) {
-        for (var j = 0; j < contents.length; j++) {
-          var txt = contents[j].text.toLowerCase();
-          if (txt.indexOf('season') !== -1 && txt.indexOf('' + seasonNum) !== -1) {
-            seasonLink = contents[j];
-            break;
-          }
-        }
-      }
-      if (!seasonLink) {
-        console.log('[DhakaFlix] Season ' + seasonNum + ' folder not found');
-        // Some shows have episodes directly in root (no Season subfolder)
-        // Try matching episode pattern directly in this listing
-        var directEps = contents.filter(function(l) {
-          return l.text.toLowerCase().indexOf(epCode.toLowerCase()) !== -1
-              && l.text.toLowerCase().endsWith('.mkv');
-        });
-        return directEps.map(function(f) { return makeStream(f, titleStr); });
-      }
-      console.log('[DhakaFlix] Found season folder:', seasonLink.text);
-      return fetchDir(seasonLink.href).then(function(epLinks) {
-        var matches = epLinks.filter(function(l) {
-          return l.text.toLowerCase().indexOf(epCode.toLowerCase()) !== -1
-              && l.text.toLowerCase().endsWith('.mkv');
-        });
-        console.log('[DhakaFlix] Found ' + matches.length + ' episode files for ' + epCode);
-        return matches.map(function(f) { return makeStream(f, titleStr); });
       });
     });
-  }).catch(function(err) {
-    console.log('[DhakaFlix] Error searching section:', err.message || err);
-    return [];
+
+    var directVideos = [];
+    var matchingDirs = [];
+
+    allItems.forEach(function(item) {
+      var decoded = decodeURIComponent(item.href);
+      var lastPart = decoded.replace(/\/$/, '').split('/').pop();
+      var cleanLast = cleanForCompare(lastPart);
+      var sim = similarity(cleanLast, targetClean);
+
+      var hasYear = year && (
+        decoded.indexOf('(' + year + ')') !== -1 ||
+        decoded.indexOf('/' + year + '/') !== -1 ||
+        decoded.indexOf('.' + year + '.') !== -1 ||
+        decoded.indexOf(' ' + year + ' ') !== -1
+      );
+
+      var words = cleanLast.split(' ');
+      var isExactWord = words.indexOf(targetClean) !== -1;
+
+      var score = sim + (hasYear ? 0.5 : 0) + (isExactWord ? 0.3 : 0);
+
+      if (isVideoFile(item.href, item.size)) {
+        if (sim >= 0.35 || isExactWord) {
+          directVideos.push({ item: item, score: score, hasYear: hasYear });
+        }
+      } else {
+        if (sim >= 0.35 || isExactWord) {
+          matchingDirs.push({ item: item, score: score, hasYear: hasYear });
+        }
+      }
+    });
+
+    // If items with exact year exist, filter to only items with that year
+    if (year) {
+      var dvYear = directVideos.filter(function(v) { return v.hasYear; });
+      if (dvYear.length > 0) directVideos = dvYear;
+
+      var mdYear = matchingDirs.filter(function(d) { return d.hasYear; });
+      if (mdYear.length > 0) matchingDirs = mdYear;
+    }
+
+    // If direct videos found, filter low scores and return
+    if (directVideos.length > 0) {
+      directVideos.sort(function(a, b) { return b.score - a.score; });
+      var topScore = directVideos[0].score;
+      var bestVideos = directVideos.filter(function(v) { return v.score >= topScore - 0.4; });
+      return bestVideos.map(function(dv) {
+        return makeStream(serverBase, dv.item, titleStr);
+      });
+    }
+
+    // Otherwise inspect top matching directories
+    if (matchingDirs.length === 0) return [];
+
+    matchingDirs.sort(function(a, b) { return b.score - a.score; });
+    var topDirs = matchingDirs.slice(0, 3);
+
+    var dirTasks = topDirs.map(function(d) {
+      return h5aiSearch(serverBase, d.item.href, 'mkv');
+    });
+
+    return Promise.all(dirTasks).then(function(dirResultsList) {
+      var foundStreams = [];
+      dirResultsList.forEach(function(files) {
+        files.forEach(function(f) {
+          if (isVideoFile(f.href, f.size)) {
+            foundStreams.push(makeStream(serverBase, f, titleStr));
+          }
+        });
+      });
+      return foundStreams;
+    });
   });
 }
 
-function findTvStreams(title, seasonNum, episodeNum, titleStr) {
-  var engSection = tvSection(title);
-  console.log('[DhakaFlix] TV search — English section + Korean flat listing');
-  var tasks = [
-    findEpisodeInSection(engSection, title, seasonNum, episodeNum, titleStr),
-    findEpisodeInSection(KOREAN_TV_BASE, title, seasonNum, episodeNum, titleStr),
-  ];
+function findMovieStreams(title, origTitle, year, titleStr) {
+  var queries = getSearchQueries(title, origTitle);
+  var servers = SERVERS.movie;
+
+  var tasks = servers.map(function(server) {
+    return searchMoviesOnServer(server, queries, title, year, titleStr);
+  });
+
   return Promise.all(tasks).then(function(results) {
-    var all = [];
-    results.forEach(function(r) { all = all.concat(r); });
-    return all;
+    var streams = [];
+    results.forEach(function(sList) { streams = streams.concat(sList); });
+
+    // Cross-server year filtering: if any streams match target release year, keep matching year
+    if (year) {
+      var matchingYear = streams.filter(function(s) {
+        var dec = decodeURIComponent(s.url);
+        return dec.indexOf('(' + year + ')') !== -1 ||
+               dec.indexOf('/' + year + '/') !== -1 ||
+               dec.indexOf('.' + year + '.') !== -1 ||
+               dec.indexOf(' ' + year + ' ') !== -1;
+      });
+      if (matchingYear.length > 0) {
+        streams = matchingYear;
+      }
+    }
+
+    // Deduplicate by URL
+    var seen = {};
+    return streams.filter(function(s) {
+      if (seen[s.url]) return false;
+      seen[s.url] = true;
+      return true;
+    });
   });
 }
 
-function findAnimeStreams(title, seasonNum, episodeNum, titleStr) {
-  var section = animeSection(title);
-  console.log('[DhakaFlix] Anime search — section:', section.substring(section.lastIndexOf('/') - 30));
-  return findEpisodeInSection(section, title, seasonNum, episodeNum, titleStr);
+// ─── TV / Anime Search Logic ─────────────────────────────────────────────────
+
+function matchEpisode(href, seasonNum, episodeNum) {
+  var sStr = '' + seasonNum;
+  var eStr = '' + episodeNum;
+  var decoded = decodeURIComponent(href);
+  var lower = decoded.toLowerCase();
+
+  // Pattern 1: S01E01 or S1E01 or S01.E01
+  var p1 = new RegExp('s0*' + sStr + '[._\\s-]*e0*' + eStr + '(?![0-9])', 'i');
+  if (p1.test(lower)) return true;
+
+  // Pattern 2: 1x01 or 01x01
+  var p2 = new RegExp('\\b0*' + sStr + 'x0*' + eStr + '\\b', 'i');
+  if (p2.test(lower)) return true;
+
+  // Pattern 3: In Season N folder with episode number
+  var inSeason = new RegExp('season[._\\s-]*0*' + sStr + '(?![0-9])', 'i').test(lower);
+  if (inSeason) {
+    var p3 = new RegExp('(?:e|ep|episode)[._\\s-]*0*' + eStr + '(?![0-9])', 'i');
+    if (p3.test(lower)) return true;
+    var p4 = new RegExp('[-._\\s]0*' + eStr + '(?![0-9])[-._\\s\\[]', 'i');
+    if (p4.test(lower)) return true;
+  }
+  return false;
+}
+
+function searchTvOnServer(server, queries, title, seasonNum, episodeNum, titleStr) {
+  var serverBase = server.base;
+  var rootHref = server.root;
+  var epCode = 'S' + pad(seasonNum) + 'E' + pad(episodeNum);
+  var targetClean = cleanForCompare(title);
+
+  var tasks = queries.map(function(q) {
+    return h5aiSearch(serverBase, rootHref, q);
+  });
+
+  return Promise.all(tasks).then(function(resultsList) {
+    var allItems = [];
+    var seenHref = {};
+    resultsList.forEach(function(list) {
+      list.forEach(function(item) {
+        if (!seenHref[item.href]) {
+          seenHref[item.href] = true;
+          allItems.push(item);
+        }
+      });
+    });
+
+    // Find matching show directories
+    var dirs = allItems.filter(function(item) {
+      return !isVideoFile(item.href, item.size) || item.href.endsWith('/');
+    });
+
+    var scoredDirs = [];
+    dirs.forEach(function(d) {
+      var dirName = decodeURIComponent(d.href.replace(/\/$/, '').split('/').pop());
+      var cleanDir = cleanForCompare(dirName);
+      var sim = similarity(cleanDir, targetClean);
+
+      if (sim >= 0.35 || cleanDir.indexOf(targetClean) !== -1 || targetClean.indexOf(cleanDir) !== -1) {
+        var isSpinoff = /junior|spin-off|special|ova|oad/i.test(dirName);
+        var score = sim - (isSpinoff ? 0.4 : 0);
+        scoredDirs.push({ dir: d, score: score });
+      }
+    });
+
+    if (scoredDirs.length > 0) {
+      scoredDirs.sort(function(a, b) { return b.score - a.score; });
+      var bestDir = scoredDirs[0].dir;
+
+      // Inside best show directory, search for epCode or mkv
+      return h5aiSearch(serverBase, bestDir.href, epCode).then(function(epResults) {
+        var validFiles = epResults.filter(function(f) {
+          return isVideoFile(f.href, f.size) && matchEpisode(f.href, seasonNum, episodeNum);
+        });
+
+        // If not found directly, search all mkvs inside show folder and regex match
+        if (validFiles.length === 0) {
+          return h5aiSearch(serverBase, bestDir.href, 'mkv').then(function(allMkvs) {
+            return allMkvs.filter(function(f) {
+              return isVideoFile(f.href, f.size) && matchEpisode(f.href, seasonNum, episodeNum);
+            });
+          });
+        }
+        return validFiles;
+      }).then(function(matchedFiles) {
+        // Prioritize regular season episodes over OVAs/specials
+        matchedFiles.sort(function(a, b) {
+          var aOva = /ova|oad|special/i.test(a.href);
+          var bOva = /ova|oad|special/i.test(b.href);
+          if (aOva !== bOva) return aOva ? 1 : -1;
+          return 0;
+        });
+        return matchedFiles.map(function(f) { return makeStream(serverBase, f, titleStr); });
+      });
+    }
+
+    // Direct video fallback from root search
+    var directEpMatches = allItems.filter(function(item) {
+      return isVideoFile(item.href, item.size) && matchEpisode(item.href, seasonNum, episodeNum);
+    });
+    return directEpMatches.map(function(item) {
+      return makeStream(serverBase, item, titleStr);
+    });
+  });
+}
+
+function findTvStreams(title, origTitle, seasonNum, episodeNum, titleStr) {
+  var queries = getSearchQueries(title, origTitle);
+  var servers = SERVERS.tv;
+
+  var tasks = servers.map(function(server) {
+    return searchTvOnServer(server, queries, title, seasonNum, episodeNum, titleStr);
+  });
+
+  return Promise.all(tasks).then(function(results) {
+    var streams = [];
+    results.forEach(function(sList) { streams = streams.concat(sList); });
+    var seen = {};
+    return streams.filter(function(s) {
+      if (seen[s.url]) return false;
+      seen[s.url] = true;
+      return true;
+    });
+  });
+}
+
+function findAnimeStreams(title, origTitle, seasonNum, episodeNum, titleStr) {
+  var queries = getSearchQueries(title, origTitle);
+  var servers = SERVERS.anime;
+
+  var tasks = servers.map(function(server) {
+    return searchTvOnServer(server, queries, title, seasonNum, episodeNum, titleStr);
+  });
+
+  return Promise.all(tasks).then(function(results) {
+    var streams = [];
+    results.forEach(function(sList) { streams = streams.concat(sList); });
+    var seen = {};
+    return streams.filter(function(s) {
+      if (seen[s.url]) return false;
+      seen[s.url] = true;
+      return true;
+    });
+  });
 }
 
 // ─── Main Export ─────────────────────────────────────────────────────────────
 
 function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   return new Promise(function(resolve) {
-    // Build TMDB API URL — anime uses /tv endpoint
     var tmdbType = (mediaType === 'anime') ? 'tv' : mediaType;
     var tmdbUrl  = TMDB_BASE + '/' + tmdbType + '/' + tmdbId + '?api_key=' + TMDB_KEY;
 
@@ -362,19 +456,20 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     fetch(tmdbUrl)
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        var title    = data.title || data.name || '';
-        var year     = ((data.release_date || data.first_air_date || '')).split('-')[0];
-        var titleStr = title + (year ? ' (' + year + ')' : '');
+        var title     = data.title || data.name || '';
+        var origTitle = data.original_title || data.original_name || '';
+        var year      = ((data.release_date || data.first_air_date || '')).split('-')[0];
+        var titleStr  = title + (year ? ' (' + year + ')' : '');
 
         console.log('[DhakaFlix] Title:', titleStr, '| Type:', mediaType);
 
         var searchPromise;
         if (mediaType === 'movie') {
-          searchPromise = findMovieStreams(title, year, titleStr);
+          searchPromise = findMovieStreams(title, origTitle, year, titleStr);
         } else if (mediaType === 'tv') {
-          searchPromise = findTvStreams(title, seasonNum, episodeNum, titleStr);
+          searchPromise = findTvStreams(title, origTitle, seasonNum, episodeNum, titleStr);
         } else if (mediaType === 'anime') {
-          searchPromise = findAnimeStreams(title, seasonNum, episodeNum, titleStr);
+          searchPromise = findAnimeStreams(title, origTitle, seasonNum, episodeNum, titleStr);
         } else {
           console.log('[DhakaFlix] Unknown media type:', mediaType);
           searchPromise = Promise.resolve([]);
