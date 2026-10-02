@@ -17,7 +17,7 @@ A local scraper for the [Nuvio](https://github.com/phisher98/phisher-nuvio-provi
 2. Go to **Settings → Local Scrapers**
 3. Add this repository URL:
    ```
-   https://raw.githubusercontent.com/YOUR_USERNAME/nuvio-dhakaflix/refs/heads/main/
+   https://raw.githubusercontent.com/Niloy-Sarker/nuvio-plugins/refs/heads/main/
    ```
 4. Enable the DhakaFlix scraper
 

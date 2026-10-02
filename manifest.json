@@ -7,13 +7,26 @@
       "name": "DhakaFlix",
       "description": "Local FTP scraper for DhakaFlix (172.16.50.4). Covers Movies (all languages), TV Series (English + Korean), and Anime. Works only on local LAN.",
       "version": "1.0.0",
-      "author": "DhakaFlix User",
-      "supportedTypes": ["movie", "tv", "anime"],
+      "author": "Niloy Sarkar",
+      "supportedTypes": [
+        "movie",
+        "tv",
+        "anime"
+      ],
       "filename": "providers/dhakaflix.js",
       "enabled": true,
-      "formats": ["mkv"],
+      "formats": [
+        "mkv"
+      ],
       "logo": "http://172.16.50.4/index.html",
-      "contentLanguage": ["en", "hi", "bn", "ko", "ta", "te"]
+      "contentLanguage": [
+        "en",
+        "hi",
+        "bn",
+        "ko",
+        "ta",
+        "te"
+      ]
     }
   ]
 }
