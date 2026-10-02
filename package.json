@@ -1,0 +1,13 @@
+{
+  "name": "nuvio-dhakaflix-provider",
+  "version": "1.0.0",
+  "description": "DhakaFlix local FTP scraper for Nuvio",
+  "main": "providers/dhakaflix.js",
+  "scripts": {
+    "test": "node test_dhakaflix.js"
+  },
+  "dependencies": {
+    "cheerio-without-node-native": "^0.20.2"
+  },
+  "license": "GPL-3.0"
+}
